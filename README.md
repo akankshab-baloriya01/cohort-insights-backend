@@ -1,55 +1,139 @@
 # Cohort Insights API
 
-A FastAPI service that ingests documents, runs them through a two-stage simulated pipeline
-(`processing` → summary, `enriching` → tags), and serves results to the submitting user and
-to a partner system that addresses documents by its own `client_doc_ref`.
+A FastAPI service that ingests documents and runs them through a two-stage simulated pipeline
+(`processing` → summary, `enriching` → tags). Results are served to the submitting user and to a
+partner system that addresses documents by its own `client_doc_ref`.
 
-Stack: Python 3.12 · FastAPI · MongoDB 7 (PyMongo async) · Redis 7 · Docker Compose.
+**Stack:** Python 3.12 · FastAPI · MongoDB 7 · Redis 7 · Docker Compose
 
----
-
-## Quick start
-
-```bash
-docker-compose up --build          # or: docker compose up --build
-# API on http://localhost:8000, OpenAPI docs at http://localhost:8000/docs
-```
-
-This starts four containers: `api`, `worker` (the pipeline), `mongo`, `redis`.
-Scale the pipeline with `docker-compose up --scale worker=3`. For a faster demo:
-`PROCESSING_MIN_SECONDS=1 PROCESSING_MAX_SECONDS=2 ENRICHING_MIN_SECONDS=1 ENRICHING_MAX_SECONDS=2 docker-compose up`.
-
-**Tests** (integration tests against real MongoDB and Redis, using `pytest` + `httpx.AsyncClient`):
-
-```bash
-docker-compose run --rm api pytest            # uses the compose mongo/redis (separate test DBs, Redis DB 15)
-
-# or locally, against any MongoDB/Redis:
-python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-TEST_MONGO_URI=mongodb://localhost:27017 TEST_REDIS_URL=redis://localhost:6379/15 .venv/bin/pytest
-```
-
-All configuration is environment-based; see [.env.example](.env.example) for every variable, with notes.
-
-### Example session
-
-```bash
-curl -s -XPOST localhost:8000/documents -H 'content-type: application/json' \
-  -d '{"user_id":"alice","title":"Q3 notes","content":"Revenue grew ...","client_doc_ref":"cms-42"}'
-# 201 {"document_id":"66f...","status":"queued","content_version":1,"outcome":"created","served_from_cache":false}
-
-curl -s localhost:8000/documents/66f... -H 'X-User-Id: alice'
-curl -s localhost:8000/documents/by-ref/cms-42 -H 'X-User-Id: alice'
-curl -s 'localhost:8000/users/alice/documents?page=1&page_size=20&status=completed' -H 'X-User-Id: alice'
-curl -s -XPATCH localhost:8000/documents/66f... -H 'X-User-Id: alice' -H 'content-type: application/json' \
-  -d '{"content":"Revised text","expected_version":1}'
-curl -s -XPOST localhost:8000/documents/66f.../retry -H 'X-User-Id: alice'   # resume a failed document
-curl -s localhost:8000/health
-```
+Everything runs in Docker. You only need **Git** and **Docker**; Python, MongoDB and Redis are
+not required on your machine. Four containers start: `api`, `worker` (the pipeline), `mongo`, `redis`.
 
 ---
 
-## API
+## Setup on Linux
+
+**1. Install Docker and Git** (Ubuntu/Debian; skip if already installed):
+
+```bash
+sudo apt update
+sudo apt install -y git docker.io docker-compose-v2
+sudo usermod -aG docker $USER      # lets you run docker without sudo; log out and back in afterwards
+```
+
+**2. Clone and start:**
+
+```bash
+git clone https://github.com/akankshab-baloriya01/cohort-insights-backend.git
+cd cohort-insights-backend
+docker compose up --build
+```
+
+> If you see `unknown flag: --build` or `unknown command: docker compose`, your machine has the older
+> standalone Compose. Use `docker-compose up --build` (with a hyphen) instead.
+
+**3. Open <http://localhost:8000/docs>** once the log shows the API listening on port 8000.
+
+**Stop:** `Ctrl+C`, then `docker compose down` (add `-v` to also delete stored documents).
+
+---
+
+## Setup on Windows
+
+**1. Install Docker Desktop and Git** in PowerShell (skip if already installed):
+
+```powershell
+winget install --id Docker.DockerDesktop -e
+winget install --id Git.Git -e
+```
+
+Docker Desktop needs WSL 2. If it asks for it, run `wsl --install` as Administrator and restart.
+
+**2. Start Docker Desktop** from the Start menu and wait until it shows **Engine running**.
+Then **close and reopen PowerShell** so the `docker` and `git` commands are found.
+
+**3. Clone and start:**
+
+```powershell
+git clone https://github.com/akankshab-baloriya01/cohort-insights-backend.git
+cd cohort-insights-backend
+docker compose up --build
+```
+
+**4. Open <http://localhost:8000/docs>** once the log shows the API listening on port 8000.
+
+**Stop:** `Ctrl+C`, then `docker compose down` (add `-v` to also delete stored documents).
+
+> The warning `the attribute version is obsolete` is harmless and can be ignored.
+
+---
+
+## Using the API
+
+Open <http://localhost:8000/docs>, expand an endpoint, click **Try it out**, then **Execute**.
+
+1. **`POST /documents`** with this body. Copy `document_id` from the response.
+   ```json
+   {
+     "user_id": "alice",
+     "title": "Q3 notes",
+     "content": "Revenue grew 12% this quarter, driven by strong sales in the APAC region.",
+     "client_doc_ref": "cms-42"
+   }
+   ```
+2. **`GET /documents/{document_id}`**: paste the `document_id` and set the `x-user-id` field to `alice`.
+   Repeat until `status` is `completed` (about 15–35 s), then read `result.summary` and `result.tags`.
+3. **`GET /documents/by-ref/{client_doc_ref}`**: use `cms-42` and `x-user-id` = `alice`.
+4. **`PATCH /documents/{document_id}`** with `x-user-id` = `alice` and body
+   `{"content": "Revenue grew 15% after revised figures.", "expected_version": 1}`.
+   The version goes to 2 and the pipeline reruns.
+
+Every endpoint except `POST /documents` and `GET /health` needs the `x-user-id` header, and it must match
+the `user_id` the document was submitted with.
+
+**Faster demo** (stages take 1–2 s instead of 10–20 s). Stop the stack, then start it with:
+
+```bash
+# Linux
+PROCESSING_MIN_SECONDS=1 PROCESSING_MAX_SECONDS=2 ENRICHING_MIN_SECONDS=1 ENRICHING_MAX_SECONDS=2 docker compose up
+```
+```powershell
+# Windows PowerShell
+$env:PROCESSING_MIN_SECONDS=1; $env:PROCESSING_MAX_SECONDS=2; $env:ENRICHING_MIN_SECONDS=1; $env:ENRICHING_MAX_SECONDS=2
+docker compose up
+```
+
+## Running the tests
+
+With the stack running, in a second terminal (same command on Linux and Windows):
+
+```bash
+docker compose run --rm api pytest
+```
+
+The tests are integration tests against the real MongoDB and Redis containers. They use separate
+databases, so they don't touch the data you created.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `unknown flag: --build` (Linux) | Use `docker-compose up --build`, with a hyphen. |
+| `docker` is not recognized (Windows) | Docker Desktop was just installed: reopen PowerShell. If that isn't enough, run `$env:Path += ";C:\Program Files\Docker\Docker\resources\bin"`. |
+| `failed to connect to the docker API` / `Cannot connect to the Docker daemon` | Docker isn't running. Windows: start Docker Desktop and wait for **Engine running**. Linux: `sudo systemctl start docker`. |
+| `permission denied ... docker.sock` (Linux) | Run `sudo usermod -aG docker $USER`, then log out and in (or prefix commands with `sudo`). |
+| `port is already allocated` / port 8000 in use | Stop whatever uses port 8000, or change the port: `API_PORT=8080 docker compose up` (PowerShell: `$env:API_PORT=8080; docker compose up`). |
+| `401` | The `x-user-id` header is missing or has invalid characters. |
+| `404` on a document | Wrong `document_id`, or `x-user-id` differs from the `user_id` that submitted it. |
+| `422` | The request body is invalid JSON or has fields the endpoint doesn't accept. Check for trailing spaces in path values. |
+| `429` on submit | A user may have at most 3 documents in the pipeline at once. Wait for them to finish or use another `user_id`. |
+| A document shows `failed` | Stages fail randomly 10% of the time by design. Call `POST /documents/{document_id}/retry`. |
+
+Configuration is environment-based; see [.env.example](.env.example) for every setting.
+
+---
+
+## API reference
 
 | Method & path | Success | Errors |
 |---|---|---|
