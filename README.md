@@ -8,22 +8,134 @@ Stack: Python 3.11+, FastAPI, MongoDB (Motor), Redis, Docker Compose.
 
 ## Running
 
+### Prerequisites
+
+- Docker Engine with **Docker Compose v2**. Use the `docker compose` command (with a space).
+  The old `docker-compose` v1 (Python) crashes on current Docker with
+  `KeyError: 'ContainerConfig'` or `KeyError: 'id'`. Check with `docker compose version`. If
+  it's missing, install it with `sudo apt install docker-compose-v2`, or without sudo:
+
+  ```bash
+  mkdir -p ~/.docker/cli-plugins
+  curl -fsSL -o ~/.docker/cli-plugins/docker-compose \
+    https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-linux-x86_64
+  chmod +x ~/.docker/cli-plugins/docker-compose
+  ```
+
+### Start with Docker (recommended)
+
+From the project root:
+
 ```bash
-cp .env.example .env
-docker compose up --build
+cp .env.example .env         # first time only
+docker compose up -d --build # build and start api, mongo, redis in the background
+docker compose ps            # wait until all three show (healthy)
+```
+
+This starts three containers:
+
+| Service | Inside Docker | On your machine |
+|---|---|---|
+| `api` (FastAPI / uvicorn) | port 8000 | **http://localhost:8000** (set by `API_PORT`) |
+| `mongo` (MongoDB 7) | `mongo:27017` | not published |
+| `redis` (Redis 7) | `redis:6379` | not published |
+
+Once it's up:
+
+| What | URL |
+|---|---|
+| API base URL | http://localhost:8000 |
+| Swagger UI (try requests in the browser) | http://localhost:8000/docs |
+| ReDoc | http://localhost:8000/redoc |
+| OpenAPI schema | http://localhost:8000/openapi.json |
+| Health check | http://localhost:8000/health |
+
+The log line `Uvicorn running on http://0.0.0.0:8000` is the port **inside** the container.
+Always use the host URL from the table.
+
+Check that it works:
+
+```bash
+curl http://localhost:8000/health
+# {"mongodb":"ok","redis":"ok"}
+```
+
+### Port 8000 already in use
+
+If `docker compose up` fails with `Bind for :::8000 failed: port is already allocated`,
+something else on your machine is using port 8000. Pick another host port in `.env`:
+
+```bash
+API_PORT=8001
+```
+
+Then run `docker compose up -d` again. Every URL above changes to that port, for example
+http://localhost:8001/docs. To see what holds port 8000:
+`docker ps --filter publish=8000` or `ss -ltnp 'sport = :8000'`.
+
+### Try a request
+
+Every document endpoint needs an `X-User-Id` header (see Assumptions).
+
+```bash
+# Submit a document
+curl -X POST http://localhost:8000/documents \
+  -H "Content-Type: application/json" -H "X-User-Id: u1" \
+  -d '{"user_id": "u1", "title": "Q3 notes", "content": "Revenue grew 12%.", "client_doc_ref": "cms-123"}'
+# 201 {"document_id": "<id>", "status": "queued"}
+
+# Watch it move through processing -> enriching -> completed (about 15-35 s)
+curl -H "X-User-Id: u1" http://localhost:8000/documents/<id>
+
+# List your documents / look up by partner ref
+curl -H "X-User-Id: u1" "http://localhost:8000/users/u1/documents?page=1&page_size=10"
+curl -H "X-User-Id: u1" http://localhost:8000/documents/by-ref/cms-123
+```
+
+### Everyday commands
+
+```bash
+docker compose logs -f api   # follow API logs (Ctrl+C stops following, not the app)
+docker compose restart api   # restart only the API
+docker compose up -d --build # rebuild after code changes
+docker compose down          # stop and remove containers (MongoDB data is kept)
+docker compose down -v       # stop and also delete MongoDB data
 ```
 
 If you ran an earlier version of this project, reset the old data first with
 `docker compose down -v`. Documents created before the staleness schema existed have no
 `stages` field.
 
-- API: http://localhost:8000
-- Interactive docs: http://localhost:8000/docs
-- Health: `GET /health` (checks MongoDB and Redis)
+### Run the API without Docker
+
+You need MongoDB on `localhost:27017` and Redis on `localhost:6379`. For example, start
+only those two containers and publish their ports:
+
+```bash
+docker run -d --name cohort-mongo -p 27017:27017 mongo:7
+docker run -d --name cohort-redis -p 6379:6379 redis:7-alpine
+```
+
+Then, from the project root:
+
+```bash
+python3 -m venv env && source env/bin/activate
+pip install -r requirements-dev.txt
+cd cohort
+uvicorn main:app --reload --port 8000
+```
+
+The API is then at http://localhost:8000 (docs at http://localhost:8000/docs). The defaults
+already point at `localhost` MongoDB and Redis. Export any variable from the Configuration
+table to override one. Stop the Docker stack first, or use another `--port`, since both use
+port 8000 by default.
+
+### Tests
 
 Tests are integration tests (pytest + `httpx.AsyncClient`) against a real MongoDB on
-`localhost:27017` and Redis on `localhost:6379`. They use database `cohort_test` and Redis
-db 15, and speed up the pipeline with `STAGE_TIME_SCALE=0.05`.
+`localhost:27017` and Redis on `localhost:6379`, so start those as in the section above.
+They use database `cohort_test` and Redis db 15, and speed up the pipeline with
+`STAGE_TIME_SCALE=0.05`. Run them from the project root:
 
 ```bash
 pip install -r requirements-dev.txt
@@ -37,10 +149,13 @@ index), and list scoping and filtering.
 
 ## Configuration
 
-All settings are environment variables. See `.env.example`.
+All settings are environment variables. See `.env.example`. With Docker, put them in `.env`;
+`docker-compose.yml` passes them to the API container. It sets `MONGO_URL` and `REDIS_URL`
+to the `mongo` and `redis` containers.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `API_PORT` | `8000` | Host port for the API (Docker only; the container always listens on 8000) |
 | `MONGO_URL` / `MONGO_DB` | `mongodb://localhost:27017` / `cohort` | MongoDB connection |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection |
 | `MAX_ACTIVE_PER_USER` | `3` | Active pipeline documents allowed per user |
