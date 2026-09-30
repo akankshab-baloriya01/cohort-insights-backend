@@ -1,439 +1,326 @@
 # Cohort Insights API
 
-A FastAPI service that ingests documents and runs them through a two-stage simulated pipeline
-(`processing` → summary, `enriching` → tags). Results are served to the submitting user and to a
-partner system that addresses documents by its own `client_doc_ref`.
+A FastAPI service that accepts text documents, runs them through a simulated two-stage
+pipeline (summary → tags), and serves the results to the submitting user and to an external
+partner system that knows documents by its own `client_doc_ref`.
 
-**Stack:** Python 3.12 · FastAPI · MongoDB 7 · Redis 7 · Docker Compose
+Stack: Python 3.11+, FastAPI, MongoDB (Motor), Redis, Docker Compose.
 
-Everything runs in Docker. You only need **Git** and **Docker**; Python, MongoDB and Redis are
-not required on your machine. Four containers start: `api`, `worker` (the pipeline), `mongo`, `redis`.
-
----
-
-## Setup on Linux
-
-**1. Install Docker and Git** (Ubuntu/Debian; skip if already installed):
+## Running
 
 ```bash
-sudo apt update
-sudo apt install -y git docker.io docker-compose-v2
-sudo usermod -aG docker $USER      # lets you run docker without sudo; log out and back in afterwards
-```
-
-**2. Clone and start:**
-
-```bash
-git clone https://github.com/akankshab-baloriya01/cohort-insights-backend.git
-cd cohort-insights-backend
+cp .env.example .env
 docker compose up --build
 ```
 
-> If you see `unknown flag: --build` or `unknown command: docker compose`, your machine has the older
-> standalone Compose. Use `docker-compose up --build` (with a hyphen) instead.
+If you ran an earlier version of this project, reset the old data first with
+`docker compose down -v`. Documents created before the staleness schema existed have no
+`stages` field.
 
-**3. Open <http://localhost:8000/docs>** once the log shows the API listening on port 8000.
+- API: http://localhost:8000
+- Interactive docs: http://localhost:8000/docs
+- Health: `GET /health` (checks MongoDB and Redis)
 
-**Stop:** `Ctrl+C`, then `docker compose down` (add `-v` to also delete stored documents).
-
----
-
-## Setup on Windows
-
-**1. Install Docker Desktop and Git** in PowerShell (skip if already installed):
-
-```powershell
-winget install --id Docker.DockerDesktop -e
-winget install --id Git.Git -e
-```
-
-Docker Desktop needs WSL 2. If it asks for it, run `wsl --install` as Administrator and restart.
-
-**2. Start Docker Desktop** from the Start menu and wait until it shows **Engine running**.
-Then **close and reopen PowerShell** so the `docker` and `git` commands are found.
-
-**3. Clone and start:**
-
-```powershell
-git clone https://github.com/akankshab-baloriya01/cohort-insights-backend.git
-cd cohort-insights-backend
-docker compose up --build
-```
-
-**4. Open <http://localhost:8000/docs>** once the log shows the API listening on port 8000.
-
-**Stop:** `Ctrl+C`, then `docker compose down` (add `-v` to also delete stored documents).
-
-> The warning `the attribute version is obsolete` is harmless and can be ignored.
-
----
-
-## Using the API
-
-Open <http://localhost:8000/docs>, expand an endpoint, click **Try it out**, then **Execute**.
-
-1. **`POST /documents`** with this body. Copy `document_id` from the response.
-   ```json
-   {
-     "user_id": "alice",
-     "title": "Q3 notes",
-     "content": "Revenue grew 12% this quarter, driven by strong sales in the APAC region.",
-     "client_doc_ref": "cms-42"
-   }
-   ```
-2. **`GET /documents/{document_id}`**: paste the `document_id` and set the `x-user-id` field to `alice`.
-   Repeat until `status` is `completed` (about 15–35 s), then read `result.summary` and `result.tags`.
-3. **`GET /documents/by-ref/{client_doc_ref}`**: use `cms-42` and `x-user-id` = `alice`.
-4. **`PATCH /documents/{document_id}`** with `x-user-id` = `alice` and body
-   `{"content": "Revenue grew 15% after revised figures.", "expected_version": 1}`.
-   The version goes to 2 and the pipeline reruns.
-
-Every endpoint except `POST /documents` and `GET /health` needs the `x-user-id` header, and it must match
-the `user_id` the document was submitted with.
-
-**Faster demo** (stages take 1–2 s instead of 10–20 s). Stop the stack, then start it with:
+Tests are integration tests (pytest + `httpx.AsyncClient`) against a real MongoDB on
+`localhost:27017` and Redis on `localhost:6379`. They use database `cohort_test` and Redis
+db 15, and speed up the pipeline with `STAGE_TIME_SCALE=0.05`.
 
 ```bash
-# Linux
-PROCESSING_MIN_SECONDS=1 PROCESSING_MAX_SECONDS=2 ENRICHING_MIN_SECONDS=1 ENRICHING_MAX_SECONDS=2 docker compose up
-```
-```powershell
-# Windows PowerShell
-$env:PROCESSING_MIN_SECONDS=1; $env:PROCESSING_MAX_SECONDS=2; $env:ENRICHING_MIN_SECONDS=1; $env:ENRICHING_MAX_SECONDS=2
-docker compose up
+pip install -r requirements-dev.txt
+pytest
 ```
 
-## Running the tests
+They cover the pipeline, ownership 404s, PATCH staleness, dropping an in-flight result for an
+old version, enriching failure that keeps the summary, racing PATCHes, the rate limit, the
+content cache, crosswalk repeats (including an `explain()` check that by-ref uses the
+index), and list scoping and filtering.
 
-With the stack running, in a second terminal (same command on Linux and Windows):
+## Configuration
 
-```bash
-docker compose run --rm api pytest
-```
+All settings are environment variables. See `.env.example`.
 
-The tests are integration tests against the real MongoDB and Redis containers. They use separate
-databases, so they don't touch the data you created.
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `unknown flag: --build` (Linux) | Use `docker-compose up --build`, with a hyphen. |
-| `docker` is not recognized (Windows) | Docker Desktop was just installed: reopen PowerShell. If that isn't enough, run `$env:Path += ";C:\Program Files\Docker\Docker\resources\bin"`. |
-| `failed to connect to the docker API` / `Cannot connect to the Docker daemon` | Docker isn't running. Windows: start Docker Desktop and wait for **Engine running**. Linux: `sudo systemctl start docker`. |
-| `permission denied ... docker.sock` (Linux) | Run `sudo usermod -aG docker $USER`, then log out and in (or prefix commands with `sudo`). |
-| `port is already allocated` / port 8000 in use | Stop whatever uses port 8000, or change the port: `API_PORT=8080 docker compose up` (PowerShell: `$env:API_PORT=8080; docker compose up`). |
-| `401` | The `x-user-id` header is missing or has invalid characters. |
-| `404` on a document | Wrong `document_id`, or `x-user-id` differs from the `user_id` that submitted it. |
-| `422` | The request body is invalid JSON or has fields the endpoint doesn't accept. Check for trailing spaces in path values. |
-| `429` on submit | A user may have at most 3 documents in the pipeline at once. Wait for them to finish or use another `user_id`. |
-| A document shows `failed` | Stages fail randomly 10% of the time by design. Call `POST /documents/{document_id}/retry`. |
-
-Configuration is environment-based; see [.env.example](.env.example) for every setting.
-
----
-
-## API reference
-
-| Method & path | Success | Errors |
+| Variable | Default | Meaning |
 |---|---|---|
-| `POST /documents` | **201** created · **200** repeat of a known `client_doc_ref` | 409 stale/conflicting `ref_version`, 422, 429 |
-| `PATCH /documents/{id}` | 200 (new `content_version`, pipeline restarted) | 401, 404, 409 `expected_version` mismatch, 422, 429 |
-| `GET /documents/{id}` | 200 | 401, 404 |
-| `GET /users/{user_id}/documents?page&page_size&status` | 200, newest first | 401, 404 (not the caller), 422 |
-| `GET /documents/by-ref/{client_doc_ref}` | 200 | 401, 404 |
-| `POST /documents/{id}/retry` | 202, resumes from the failed stage | 404, 409 not failed, 429 |
-| `GET /health` | 200 `ok` / 200 `degraded` (Redis down) | 503 (MongoDB down) |
+| `MONGO_URL` / `MONGO_DB` | `mongodb://localhost:27017` / `cohort` | MongoDB connection |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection |
+| `MAX_ACTIVE_PER_USER` | `3` | Active pipeline documents allowed per user |
+| `ACTIVE_KEY_TTL` | `3600` | TTL (s) of the rate-limit counter |
+| `CACHE_TTL` | `86400` | TTL (s) of content-cache entries |
+| `WORKER_COUNT` | `2` | Pipeline workers (processing capacity) |
+| `STAGE_TIME_SCALE` | `1` | Multiplier on stage durations and backoff (tests use `0.05`) |
+| `FAILURE_RATE` | `0.1` | Simulated failure chance per stage attempt |
+| `MAX_ATTEMPTS` | `3` | Attempts per stage before it's marked `failed` |
+| `LOG_LEVEL` | `INFO` | Log level; application logs are JSON lines |
 
-Errors share one shape: `{"error": {"code": "version_conflict", "message": "..."}}`.
+## Endpoints
 
-**Identity.** There is no auth system in scope, so reads and writes identify the caller with an
-`X-User-Id` header (401 if missing or malformed). In production that value would come from a verified token
-set by a gateway. `POST /documents` takes `user_id` in the body, as the spec asks.
+| Method | Path | Success | Errors |
+|---|---|---|---|
+| POST | `/documents` | 201 `{document_id, status}` | 409 ref conflict, 422 validation, 429 rate limit |
+| PATCH | `/documents/{document_id}` | 200 | 404, 409 version conflict, 422, 429 |
+| GET | `/documents/{document_id}` | 200 | 404 |
+| GET | `/users/{user_id}/documents?page=&page_size=&status=` | 200 | 404 if `user_id` ≠ caller, 422 |
+| GET | `/documents/by-ref/{client_doc_ref}` | 200 | 404 |
+| GET | `/health` | 200 / 503 | |
 
-### What a poll returns
+A `POST` whose content is already in the cache returns 201 with `status: "completed"`.
 
-```jsonc
-{
-  "document_id": "66f...", "content_version": 2, "content_hash": "9c1e...",
-  "status": "processing",                 // queued | processing | enriching | completed | failed
-  "failed_stage": null,                   // "processing" | "enriching" when status == failed
-  "stages": {
-    "processing": {"state": "running", "attempts": 1, "started_at": "...", "finished_at": null, "error": null},
-    "enriching":  {"state": "pending", "attempts": 0, ...}
-  },
-  "result": {                             // last published result, or null
-    "content_version": 1,                 // the version BOTH summary and tags came from
-    "content_hash": "41ab...",
-    "is_current": false,                  // result.content_version == content_version
-    "summary": "...", "tags": ["..."], "source": "pipeline", "completed_at": "..."
-  }
-}
-```
-
-Stage states are `pending | running | retry_scheduled | succeeded | failed | skipped` (skipped = served from
-the content cache). The top-level `status` is the coarse position. `stages` is the structured detail, so
-"which stage failed, after how many attempts, with what error" can be read from it without extra string fields.
-
----
+The caller's identity comes from the `X-User-Id` header (see Assumptions).
 
 ## Schema & Staleness Design
 
 ### The document
 
+Every document lives in a single MongoDB document. All derived data is embedded next to the
+content it was derived from:
+
+```js
+{
+  _id: ObjectId,
+  user_id: "u1",
+  title: "Q3 notes",
+  client_doc_ref: "cms-123",          // absent when not supplied
+  content: "...",
+  content_hash: "sha256:…",           // hash of the current content
+  content_version: 3,                 // +1 on every PATCH, starts at 1
+  status: "enriching",                // queued | processing | enriching | completed | failed
+  stages: {
+    processing: {
+      state: "completed",             // pending | running | completed | failed
+      content_version: 3,             // version of the content this summary came from
+      summary: "…",
+      attempts: 1,
+      error: null
+    },
+    enriching: {
+      state: "running",
+      content_version: 3,             // version of the content these tags came from
+      tags: null,
+      attempts: 1,
+      error: null
+    }
+  },
+  created_at, updated_at
+}
 ```
-_id              ObjectId
-user_id          str
-title, content   str
-content_hash     sha256(content)
-content_version  int      1 at insert; +1 on every content change. The fencing token.
-client_doc_ref   str      optional; field omitted (not null) when absent
-ref_version      int?     partner-supplied ordering for the ref
-status           str      queued | processing | enriching | completed | failed
-stages           { processing: StageInfo, enriching: StageInfo }   always describe content_version
-draft            { content_version, content_hash, summary } | null  stage-1 output of the current run
-result           { content_version, content_hash, summary, tags, completed_at, source } | null
-lease            { owner, token, expires_at } | null                 worker claim
-next_run_at      datetime | null                                     retry backoff / claimability
-created_at, updated_at
+
+`status` is the top-level position in the pipeline. `stages.<name>.state` and
+`stages.<name>.error` say exactly which stage failed and why. There's no ad-hoc
+`"failed_at_enriching"` string. A caller reads `status: "failed"` plus the one stage whose
+`state` is `failed`.
+
+### The mechanism: a version counter on every derived field
+
+`content_version` is an integer that belongs to the content. Each derived field (the summary
+and the tags) carries the `content_version` it was computed from. A reader never has to
+guess: it compares numbers.
+
+- The summary is current if `stages.processing.content_version == content_version`.
+- The tags are current if `stages.enriching.content_version == content_version`.
+
+### Why a mismatch is impossible, not just unlikely
+
+Three rules, each enforced by MongoDB's single-document atomicity:
+
+1. **PATCH is one atomic update.** In a single `update_one`, PATCH sets the new `content`,
+   `content_hash`, increments `content_version`, resets `status` to `queued`, and resets both
+   stages to `pending` with `summary` and `tags` cleared. MongoDB applies all the fields of a
+   single-document update together, so no reader can ever see the new content next to the
+   old summary. They either see the whole old document or the whole new one.
+
+2. **Workers write conditionally on the version they read.** A worker that started on
+   version 3 writes its result with the filter
+   `{_id: id, content_version: 3, "stages.processing.state": "running"}`. If a PATCH bumped
+   the document to version 4 in the meantime, the filter matches nothing, and the old result
+   is dropped. A late write from an old run cannot land on newer content.
+
+3. **Enriching only reads a summary of the current version.** The enriching stage reads
+   `summary` together with `content_version` in one read, and writes tags with the same
+   version guard. Its tags are therefore always derived from a summary of the same
+   version.
+
+On top of that, `GET /documents/{id}` only returns `summary` and `tags` when their stored
+version equals the current `content_version`. It also always returns both version numbers, so
+a caller can check this itself:
+
+```json
+{
+  "document_id": "…",
+  "status": "processing",
+  "content_version": 4,
+  "stages": {
+    "processing": {"state": "running", "content_version": null, "summary": null},
+    "enriching":  {"state": "pending", "content_version": null, "tags": null}
+  }
+}
 ```
 
-### The mechanism
+A reader mid-reprocessing sees `summary: null` instead of the old summary, so it's never told
+the old summary is current.
 
-Derived data is stamped with the version it came from, and every write that could produce derived data is a
-compare-and-set on that version. The rules:
+### PATCH vs PATCH (optimistic concurrency)
 
-1. **`summary` and `tags` are never stored as separate fields.** They exist only inside `result`, and
-   `result` is only ever written as a whole sub-document in one `$set` (`build_result()` is the only
-   constructor). MongoDB writes to a single document are atomic, and a read returns one snapshot of the
-   document. So a reader sees the whole old `result` or the whole new one, never half of each.
-2. **`result` carries its own `content_version` and `content_hash`,** next to the top-level
-   `content_version`/`content_hash` of the same snapshot. The reader always has two values to compare, not a
-   bare flag: `is_current` is literally `result.content_version == content_version`, and a client can also check
-   `result.content_hash` against a hash of the content it holds.
-3. **Content and version only change together.** `PATCH` (and a repeat submission with new content) does one
-   `find_one_and_update` filtered on the `content_version` it read. That single update sets the new
-   `content` + `content_hash`, runs `$inc content_version`, clears `draft`, resets `stages`, clears `lease`, and
-   sets status `queued`. The old `result` stays, still labelled with the old version, so it shows as
-   `is_current: false`.
-4. **Every worker write is fenced.** Workers write with `filter = {_id, content_version: v, lease.token: t}`.
-   The stage-2 publish also requires `draft.content_version: v`. Tags are computed from `draft.summary`, and the
-   draft and the tags go into `result` in the publishing write.
+PATCH accepts an optional `expected_version`. The update filter includes
+`content_version: expected_version`. If two PATCHes race from the same version, exactly one
+matches. The loser gets **409 Conflict** with the current version, and can re-read and
+retry. Without `expected_version`, the last write wins, which is still safe because each
+PATCH is atomic and bumps the version.
 
-**Why a mix cannot be observed:**
+## Two-Stage Pipeline
 
-- Take any write that sets `result` from a run of version `v`. It only succeeds if the document's
-  `content_version` is still `v` at that moment. Rule 3 means the content is then still the version-`v` content.
-  So the published `result` is the output for exactly the content its label names.
-- If a PATCH commits first, the version is `v+1` and the fenced write matches zero documents. The worker
-  logs "discarded" and nothing is written. This covers a stage finishing after a PATCH
-  (`test_inflight_stage1_for_old_content_is_discarded`). It also covers a v1 summary in `draft` meeting v2 tags:
-  the PATCH cleared the draft and bumped the version, so the v1 enrichment cannot publish
-  (`test_old_summary_never_combined_with_new_tags`).
-- If the publish commits first, it is a correct v1 result. The PATCH then relabels it as not current by bumping
-  the version beside it.
-- Content-cache hits follow the same rule. The cached result is looked up by the new content's hash and is
-  written in the same CAS that bumps the version.
+```
+queued → processing → enriching → completed
+             ↓             ↓
+           failed        failed
+```
 
-None of this depends on timing. The only primitive used is single-document atomicity. Each invariant holds in
-every snapshot: `result.content_version <= content_version`, and `result` equals the pipeline's output for
-`content@result.content_version`. `test_polling_during_repeated_patches_never_sees_mixed_versions` checks both
-after every step of an interleaved run. On a replica set, reading from a lagging secondary can return an *older*
-snapshot. That snapshot is still internally consistent, because the same atomicity applies on replicas.
+- **processing** (10–20 s): writes a mock summary. About 10% random failure.
+- **enriching** (5–15 s): reads the summary and writes mock tags. About 10% random failure.
+- **Workers** are `WORKER_COUNT` asyncio tasks started with the app. That's the limited
+  processing capacity. Each loop claims an enriching job first (to finish work already in
+  progress), then a queued one, and otherwise sleeps 0.5 s.
+- **Claiming a job** is an atomic `find_one_and_update`. For processing, the filter is
+  `{status: "queued", "stages.processing.state": "pending"}`, and the update sets
+  `status: "processing"` and the state to `running`. When processing succeeds, it sets
+  `status: "enriching"` with the enriching stage still `pending`. Enriching is then claimed the
+  same way. Two workers can't claim the same stage, because only one update can match the
+  `pending` filter.
+- **A failure at enriching keeps the summary.** The processing stage stays `completed` with
+  its summary. Retries only re-run enriching.
+- **Retry with backoff:** each stage makes up to `MAX_ATTEMPTS` (3) attempts, waiting 1 s
+  then 2 s between them. Only after the last attempt fails are the stage and the document
+  marked `failed`. `attempts` and `error` are recorded on the stage.
+- **Restart recovery:** on startup, jobs left `running` by a previous process are put back
+  to `pending`. A document stuck in processing goes back to `queued`. A document stuck in
+  enriching restarts enriching only, and keeps its summary. This assumes a single API
+  process (see "More time").
 
-### Two-stage pipeline and partial progress
+## Crosswalk: `client_doc_ref`
 
-`queued → processing → enriching → completed | failed`. When stage 1 succeeds, it writes `draft` and sets
-`status=enriching`, and it **releases the lease**. Stage 2 is a separate claim that any worker can pick up.
-If enrichment fails, the draft is kept. Automatic retries and the manual `POST /documents/{id}/retry` both
-resume at `enriching` and never re-run `processing` (`test_enrichment_failure_preserves_stage1_and_retry_resumes_there`).
+- Optional at submission. When present, it's unique across all documents.
+- Index: `{client_doc_ref: 1}`, **unique, partial** (`partialFilterExpression:
+  {client_doc_ref: {$type: "string"}}`). Documents without a ref don't collide with each
+  other.
+- The query is `{client_doc_ref: {$eq: ref, $type: "string"}}`. The `$type` matters: MongoDB
+  only uses a partial index when the query provably falls inside the partial filter, and a
+  bare `{client_doc_ref: ref}` equality does not, so it falls back to a collection scan. With
+  `$type`, `GET /documents/by-ref/{ref}` is an index point lookup on `client_doc_ref_unique`.
+  A test checks this with `explain()`.
+- By-ref is scoped by owner like every other read, so another user's ref returns 404.
 
-Each stage retries on its own with exponential backoff and jitter (`STAGE_MAX_ATTEMPTS`,
-`RETRY_BACKOFF_*`). Between attempts the stage shows `retry_scheduled` with the last error, and `next_run_at`
-hides the job from workers until the backoff ends. Once attempts run out, the document becomes `failed`, and
-`failed_stage` plus `stages.<stage>.error` say exactly where.
+**Decision for a repeat submission with the same ref:**
 
-### Concurrency
-
-| Race | Outcome |
+| Repeat POST with an existing ref | Result |
 |---|---|
-| Two workers claim the same job/stage | The claim is one atomic `find_one_and_update` that sets `lease`; only one wins (`test_two_workers_cannot_claim_the_same_job`). |
-| A worker stalls past its lease | Another worker reclaims it with a new token. The stale worker's writes fail the token fence (`test_expired_lease_is_reclaimed_and_old_worker_is_fenced`). A crash-looping stage is failed once attempts run out. |
-| PATCH races an in-flight stage | The version fence drops the stale write (see above). |
-| Two PATCHes with the same `expected_version` | Exactly one gets 200, the other gets **409 `version_conflict`** (`test_racing_patches_with_expected_version_exactly_one_wins`). |
-| Two PATCHes without `expected_version` | Last writer wins, but each is applied as its own version (2 then 3). The loser re-reads and re-applies, so no write is silently lost. |
-| Concurrent POSTs with the same `client_doc_ref` | One document is created. The others become repeat submissions (see below). |
+| Same user, same content (same `content_hash`) | **200**, returns the existing document. It's a retry, so it's idempotent. |
+| Same user, different content | **409 Conflict**, with the existing `document_id` and `content_version`. To change content, the partner must `PATCH`. |
+| Different user | **409 Conflict** (without revealing the other user's document) |
 
----
+Why reject instead of "treat as a new version": the partner may send out of order, and a
+bare POST carries no ordering information. If a late, older POST were treated as a new
+version, it would silently overwrite newer content. Rejecting forces the partner to state
+intent with PATCH plus `expected_version`, which has defined ordering. Retries stay safe
+because identical resubmissions are idempotent.
 
-## Crosswalk (`client_doc_ref`)
+The unique index also covers the race where two POSTs with the same new ref arrive at once.
+One insert wins, and the other gets a `DuplicateKeyError`, which maps to the same rules above.
 
-**Index:** `user_client_doc_ref_unique` = `{user_id: 1, client_doc_ref: 1}`, `unique: true`,
-`partialFilterExpression: {client_doc_ref: {$exists: true}}`. `GET /documents/by-ref/{ref}` queries
-`{user_id, client_doc_ref}` and resolves via IXSCAN on this index. `test_by_ref_lookup_uses_the_index` asserts
-this with `explain()`. Documents without a ref leave the field out, so they are not indexed and do not collide.
+## Per-User Rate Limiting (Redis)
 
-**Assumption: refs are unique per owner, not globally.** A globally unique ref would let one tenant probe for,
-or squat on, another tenant's refs: submitting a ref that someone else owns would have to fail in a way that
-reveals it exists. Scoping by owner also keeps the unique index shardable (see At 100×). If the partner is one
-system that must see all its refs, the fix is to authenticate the partner as the owner of its documents, not to
-weaken tenant isolation.
+- Key `active:{user_id}`: the number of the user's documents in `queued`, `processing` or
+  `enriching`.
+- On submit, `INCR` and `EXPIRE` run in one `MULTI` transaction. If the new value is over 3,
+  the API `DECR`s it back and returns **429**. `INCR` is atomic, so two concurrent submits
+  can never both see a count of 3.
+- A PATCH takes a slot only when the document was not already active. If it was active, the
+  in-flight run's final write is dropped by the version guard, so that run never releases
+  its slot, and the new run releases it exactly once.
+- When a document reaches `completed` or `failed`, the worker decrements the key. It does this
+  only if its guarded write actually matched.
+- The key has a TTL (1 h), refreshed on each change, so a crashed worker can't leave a user
+  blocked forever.
+- **If Redis is down**, the limit falls back to counting in MongoDB with
+  `{user_id, status: {$in: [...]}}` (served by the `user_id + status` index).
 
-**Repeat submissions of a known ref** (same owner). The rule is: *a ref names one logical document, and
-re-sending it is an upsert of that document's content.*
+## Content Cache (Redis)
 
-| Incoming | Result |
-|---|---|
-| Same content (same hash) | **200 `outcome: "unchanged"`**. Idempotent: same `document_id`, no reprocessing, no rate-limit slot. Safe for blind partner retries. |
-| Different content | **200 `outcome: "new_version"`**. Same `document_id`, content replaced exactly like a PATCH (`content_version+1`, both stages re-run, old result marked not current). |
-| `ref_version` older than stored | **409 `stale_ref_version`**. An out-of-order delivery cannot overwrite newer content. |
-| `ref_version` equal to stored, different content | **409 `ref_version_conflict`**. The partner broke its own versioning contract. |
-
-`ref_version` is optional. Without it, the latest arrival wins (arrival order). With it, updates are ordered by
-the partner's own revision, and the check is part of the CAS filter, so two racing redeliveries still apply in
-revision order. Concurrent first submissions of one ref are serialized by a 5-second Redis lock per
-`(user, ref)`, so only one of them takes a rate-limit slot. The others wait and then take the repeat path. If
-Redis is down, the unique index still guarantees a single document. All of this is tested in
-[tests/test_crosswalk.py](tests/test_crosswalk.py).
-
----
+- Key `cache:{sha256(content)}` → `{summary, tags}`, TTL 24 h.
+- It's written only when a document reaches `completed`.
+- On POST or PATCH, if the hash hits, the document is stored as `completed` right away with
+  the cached summary and tags, stamped with the document's **current** `content_version`.
+- The key is the content hash, never the `document_id`. After a PATCH, the new content has a
+  new hash, so the old content's cache entry can't be returned for the new content.
+- **If Redis is down**, the lookup falls back to MongoDB:
+  `{content_hash, status: "completed"}` on the `content_hash` index. That's safe because a
+  `completed` document's hash and both stage results were written at the same version.
 
 ## Ownership
 
-Every read is filtered by `{_id, user_id}` in the database query itself, not checked after loading. Another
-user's document, a nonexistent id, and a malformed id all return the same **404** body
-(`test_foreign_document_indistinguishable_from_missing`). A 403 would confirm that the id exists. Listing
-another user's documents also returns 404. By-ref lookup is scoped the same way.
-
-## Per-user rate limiting (Redis)
-
-At most `MAX_ACTIVE_DOCS_PER_USER` (3) documents per user across `queued`, `processing`, and `enriching`. Going
-over returns **429**. Each user has a Redis **sorted set** `rl:active:{user}` whose members are pipeline runs
-(`{doc_id}:{content_version}`), with an expiry timestamp as the score. One Lua script purges expired members,
-checks the count, and adds the member atomically. Compared with an `INCR/DECR` counter:
-
-- **Idempotent.** Adding or removing the same run twice cannot drift the count.
-- **Self-healing.** A release lost to a crash or a Redis blip expires after `ACTIVE_SLOT_TTL_SECONDS`. Workers
-  refresh the score at every stage claim.
-- **Safe against the PATCH/complete race.** A PATCH on an active document moves the slot from `id:v` to
-  `id:v+1` in the same script, so the old run's late release touches nothing. A PATCH on an idle
-  (completed/failed) document needs a new slot. A cache hit never takes one.
-
-## Content cache (Redis, keyed by content hash)
-
-The key is `cache:result:{sha256(content)}` → `{content_hash, summary, tags}`, with a TTL
-(`CONTENT_CACHE_TTL_SECONDS`). The key never involves `document_id`: after a PATCH the lookup uses a different
-key, so an old version's entry has nothing to leak into (`test_cache_is_keyed_by_content_across_patch`). The
-value repeats its hash and is checked against the key on read. MongoDB is the second tier: on a Redis miss, the
-indexed lookup `result.content_hash` finds any published result for that content and refills Redis. A hit
-completes the document immediately (`status: completed`, `source: "cache"`, stages `skipped`) without touching
-the rate limit.
-
-The cache is **shared across users**. Summary and tags are a pure function of the content, so a hit tells a user
-nothing beyond content they already submitted. With a real LLM (non-deterministic output, per-tenant prompts),
-I would scope the key per tenant.
-
-## Redis unavailability (graceful degradation)
-
-| Concern | When Redis is down |
-|---|---|
-| Rate limit | Falls back to `count_documents({user_id, status ∈ active})` on the `user_status_created` index. Still correct, just racy under concurrency. Slots are neither failed open nor failed closed. |
-| Content cache | Skips to the MongoDB tier. Writes are logged and skipped. |
-| Ref creation lock | Proceeds without it. The unique index still arbitrates. |
-| `/health` | `200 {"status": "degraded"}`. MongoDB down → `503`. |
-
-Tested by `test_redis_outage_degrades_gracefully`. Redis socket timeouts are short (0.5s) so an outage degrades
-quickly instead of hanging requests. Every Redis call catches `RedisError` specifically, and every catch logs.
+Every read checks `user_id` from the `X-User-Id` header against the document's `user_id`,
+inside the query itself (`{_id: id, user_id: caller}`). A document owned by someone else, an
+ID that doesn't exist, and an invalid ID all return the same **404 "Document not found"**, so
+a non-owner can't confirm that a document exists.
 
 ## Indexes
 
-| Name | Keys | Serves |
-|---|---|---|
-| `user_created` | `user_id, created_at↓, _id↓` | list, newest first |
-| `user_status_created` | `user_id, status, created_at↓, _id↓` | list with `status` filter; rate-limit fallback count |
-| `user_client_doc_ref_unique` | `user_id, client_doc_ref` (unique, partial) | by-ref lookup, ref uniqueness |
-| `result_content_hash` | `result.content_hash` (partial) | content cache second tier |
-| `claim` | `status, next_run_at` | worker claim query |
-
-`GET /documents/{id}` uses `_id`. Indexes are created at startup (idempotently) by both the API and the worker.
-
-## Project layout
-
-```
-app/
-  main.py            app factory, lifespan, request-id + access-log middleware
-  config.py          pydantic-settings (env-based)
-  domain.py          statuses, stage states, hashing, result constructor
-  models.py          Pydantic request/response models + validation
-  repository.py      all MongoDB access, indexes, fenced CAS writes
-  resources.py       client construction shared by api and worker
-  dependencies.py    DI: service, caller identity
-  routers/           documents, users, health
-  services/          documents (use-cases), rate_limiter, content_cache, locks, stages (mock pipeline)
-  worker.py          claim/lease loop, retries with backoff
-tests/               integration (API + worker in-process, real Mongo/Redis) and unit tests
-```
-
-## Assumptions
-
-- `content` and `title` are whitespace-stripped. The hash is over the stripped UTF-8 content, with no further
-  normalisation, so a one-character change counts as new content. Content is capped at 100k characters.
-  Control characters are rejected.
-- `PATCH` changes content only, per the spec. `user_id` and unknown fields are rejected (`extra="forbid"`).
-- A PATCH with identical content is a no-op (200, same version). It does not reprocess.
-- Refs are restricted to `[A-Za-z0-9._:-]{1,128}` so they are always a single URL path segment.
-- `page_size` is capped at `MAX_PAGE_SIZE`. `page` is capped at 10,000 as a guard against deep skips (see At 100×).
-- MongoDB is the job queue: workers poll with an indexed claim query. This keeps jobs durable and makes
-  claiming atomic without a second source of truth. Redis stays purely for the limiter and cache, as the brief
-  asks, and a Redis outage never loses a job.
-
-## What I'd do differently with more time
-
-- **Push-based dispatch.** Replace polling with Redis Streams or a change stream to wake workers, keeping Mongo
-  as the source of truth. Add lease heartbeats so stage duration isn't bounded by `LEASE_SECONDS`.
-- **Keyset pagination** and an opaque cursor (see below). Drop the exact `total`, which is a count on every call.
-- **Real authentication** (JWT or partner API keys) in place of `X-User-Id`, with the partner as a first-class
-  principal. Per-tenant cache scoping.
-- **Observability.** Prometheus metrics (queue depth, stage latency, failure/retry rates, discarded-by-fence
-  counts) and OpenTelemetry tracing across API → worker.
-- **A periodic reconciler** that rebuilds each user's Redis slot set from MongoDB, instead of relying only on slot
-  expiry after a Redis failover. Also a dead-letter view for documents that exhausted retries.
-- Replica-set MongoDB in compose, so `majority` write/read concerns and transactions are available and tested.
-
----
+| Index | Used by |
+|---|---|
+| `{user_id: 1, created_at: -1}` | List a user's documents, newest first |
+| `{user_id: 1, status: 1, created_at: -1}` | List with a status filter; rate-limit fallback count |
+| `{client_doc_ref: 1}` unique, partial | `GET /documents/by-ref/{ref}`, uniqueness of refs |
+| `{content_hash: 1}` | Content-cache fallback when Redis is down |
+| `{status: 1, updated_at: 1}` | Workers finding jobs to claim, and stuck-job recovery |
 
 ## At 100×
 
-**500K documents for one user.** The `user_id`-prefixed compound indexes still find the *first* page in
-O(log n): the B-tree seeks to `user_id` and reads 20 keys in `created_at` order. What breaks is everything that
-touches the user's whole range. `count_documents` for `total` walks 500K index keys on every list call. A deep
-`skip` walks every skipped key. A rarely-true `status` filter on the non-status index would scan the range, which
-is why `user_status_created` exists. The bigger problem is sharding: with the key `user_id` alone, all 500K
-documents share one shard-key value. That makes an unsplittable **jumbo chunk**, pinning a whale user's whole
-write and read load to one shard.
+**A single user with 500K documents.** The `{user_id, created_at}` index still finds that
+user's documents quickly. The problem is everything after that. A listing with a status filter
+walks a huge key range when the filter is selective, which is why the index includes `status`
+before `created_at`. The bigger problem is skip/limit: page 20,000 must walk and discard
+200,000 index entries before returning 10. The rate-limit fallback count is fine, because it's
+bounded by the active documents, at most 3.
 
-**Shard key: `{user_id: 1, _id: 1}`.** Every hot query includes `user_id` (get-by-id is `{_id, user_id}`, list,
-by-ref, rate-limit fallback), so they are all *targeted* to one shard, or a few for a whale. The `_id` suffix
-lets a whale's range split into many chunks. Why not `user_id` alone: jumbo chunks, as above. Why not hashed
-`_id`: listing a user's documents would become scatter-gather across every shard. The usual objection to a
-monotonic suffix is a hot last chunk, and that is bounded here. The rate limiter caps each user at 3 in-flight
-documents, so one user cannot flood a chunk with inserts. It also keeps `(user_id, client_doc_ref)` enforceable,
-because MongoDB only enforces unique indexes that are prefixed by the shard key. A *global* ref uniqueness could
-not be kept after sharding. What does not target is the worker's `claim` query (`status, next_run_at`): it would
-scatter. At this scale I would move dispatch to a partitioned queue (Kafka or Redis Streams keyed by `user_id`)
-and keep Mongo as the source of truth.
+**Shard key.** `{user_id: "hashed", _id: 1}` is my choice. A plain `user_id` range key
+concentrates new writes on whichever chunk holds the busiest users, and a single 500K-doc user
+becomes a "jumbo" chunk that can't be split. That's the hot partition. A monotonically
+increasing key like `_id` or `created_at` alone sends every insert to the last chunk. Hashing
+`user_id` spreads users across shards. The second field lets one big user's documents split
+across chunks. Most of our queries include `user_id`, so the listing stays a targeted query on
+one shard instead of a scatter-gather. The one query without `user_id`, by-ref, is served by a
+separate lookup collection keyed by `client_doc_ref`, and so is also targeted.
 
-**Redis limiter at 100× submit QPS.** The design scales: one key per user, a Lua script over a set of at most 3
-members (O(log 3)), and single-key scripts, so it runs unchanged on **Redis Cluster** with users spread across
-slots. What breaks is a single Redis primary's CPU. Every submit runs a script, and every rejected 429 still costs
-one. I would shard it with Redis Cluster, add `Retry-After` to cheapen retry storms, and reject obvious abusers
-earlier with a cheap token bucket at the edge. Failover is the real correctness gap. Async replication can drop
-recent `ZADD`s, briefly under-counting, so I'd add a reconciler that rebuilds sets from Mongo. The Mongo fallback
-would stampede at 100×, so it needs a circuit breaker with a per-process local limit.
+**Redis rate limiter at 100× QPS.** An atomic check-and-increment script is correct at any
+QPS, but all traffic for one user hits one key on one Redis node. That's fine, since the
+limit is 3. The real risks are counter drift and a single Redis instance. Drift comes from
+crashes between increment and decrement, and grows with volume. I would replace the counter
+with a sorted set per user, holding the active `document_id`s scored by lease expiry. Expired
+entries are removed on every check, so drift heals itself. Then I'd move to Redis Cluster,
+which distributes keys by hash slot.
 
-**Pagination.** `skip/limit` does not survive. `skip(N)` costs O(N) index keys, so page 20,000 of a 500K-document
-user reads 400K keys. Pages also shift as new documents arrive at the head, which causes duplicates and gaps.
-I'd switch to **keyset (cursor) pagination**: return an opaque cursor for the last item's `(created_at, _id)`,
-query `{user_id, (created_at, _id) < cursor}` sorted descending with `limit+1` for `has_next`, and drop the exact
-`total` (or show an approximate, cached count). Every page then costs O(page_size) on the existing indexes,
-however deep it is.
+**skip/limit pagination.** It doesn't hold up. Its cost grows with the page number, and
+results shift when new documents arrive between pages, so users see duplicates or miss items.
+I'd use cursor (keyset) pagination: return an opaque cursor `(created_at, _id)` of the last
+item, and query `{user_id, (created_at, _id) < cursor}` sorted descending with a limit. Every
+page is then a bounded index seek, whatever its depth.
+
+## Assumptions
+
+- **Identity:** there's no real auth. The caller's identity is the `X-User-Id` header. In
+  production, this would come from a verified token.
+- **`POST /documents` body `user_id`** must match `X-User-Id`, otherwise the API returns 403.
+- **PATCH** changes only `content`. The title and the ref are immutable.
+- **Cache scope:** identical content from different users shares the cached result, since
+  the mock output depends only on the content.
+- **Timestamps** are UTC.
+
+## What I'd do differently with more time
+
+- A real job queue (Redis Streams or arq) instead of in-process worker tasks, with separate
+  worker containers, and lease-based stuck-job recovery (`running` with an expiry) instead of
+  resetting on startup, which is only safe with one process.
+- A retry endpoint for documents that end `failed`, resuming at the failed stage.
+- A transactional outbox, so the "document saved" and "job enqueued" steps can't diverge.
+- Cursor pagination in the API itself, not just in the design.
+- Real authentication (JWT) instead of a header.
+- Metrics (queue depth, stage latency, failure rate) and tracing.
+- Load tests for the rate limiter and the pipeline.

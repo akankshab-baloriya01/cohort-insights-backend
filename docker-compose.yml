@@ -1,25 +1,20 @@
-version: "3.8"
-
-x-app-env: &app-env
-  MONGO_URI: mongodb://mongo:27017
-  MONGO_DB: cohort_insights
-  REDIS_URL: redis://redis:6379/0
-  LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  MAX_ACTIVE_DOCS_PER_USER: ${MAX_ACTIVE_DOCS_PER_USER:-3}
-  PROCESSING_MIN_SECONDS: ${PROCESSING_MIN_SECONDS:-10}
-  PROCESSING_MAX_SECONDS: ${PROCESSING_MAX_SECONDS:-20}
-  ENRICHING_MIN_SECONDS: ${ENRICHING_MIN_SECONDS:-5}
-  ENRICHING_MAX_SECONDS: ${ENRICHING_MAX_SECONDS:-15}
-  STAGE_FAILURE_RATE: ${STAGE_FAILURE_RATE:-0.10}
-  STAGE_MAX_ATTEMPTS: ${STAGE_MAX_ATTEMPTS:-3}
-  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
-
 services:
   api:
     build: .
     ports:
       - "${API_PORT:-8000}:8000"
-    environment: *app-env
+    environment:
+      MONGO_URL: ${MONGO_URL:-mongodb://mongo:27017}
+      MONGO_DB: ${MONGO_DB:-cohort}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MAX_ACTIVE_PER_USER: ${MAX_ACTIVE_PER_USER:-3}
+      ACTIVE_KEY_TTL: ${ACTIVE_KEY_TTL:-3600}
+      CACHE_TTL: ${CACHE_TTL:-86400}
+      WORKER_COUNT: ${WORKER_COUNT:-2}
+      STAGE_TIME_SCALE: ${STAGE_TIME_SCALE:-1}
+      FAILURE_RATE: ${FAILURE_RATE:-0.1}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       mongo:
         condition: service_healthy
@@ -28,34 +23,22 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-
-  worker:
-    build: .
-    command: ["python", "-m", "app.worker"]
-    environment: *app-env
-    # Let an in-flight stage (max 20s) finish on shutdown; otherwise its lease expires and it is re-run.
-    stop_grace_period: 30s
-    depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    restart: unless-stopped
 
   mongo:
     image: mongo:7
     volumes:
-      - mongo-data:/data/db
+      - mongo_data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -63,4 +46,4 @@ services:
       retries: 10
 
 volumes:
-  mongo-data:
+  mongo_data:
